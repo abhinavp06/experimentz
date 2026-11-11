@@ -12,24 +12,25 @@
 package main
 
 import (
-	"fmt"
+	"errors"
+	"io"
 	"log"
 	"net"
 )
 
 func main() {
-	ln, err := net.Listen("tcp", "127.0.0.1:8080")
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
+	ln, err := net.Listen("tcp", "127.0.0.1:8080")
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	fmt.Println("listening on 127.0.0.1:8080")
+	log.Println("listening on 127.0.0.1:8080")
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Println(err)
+			log.Println("accept:", err)
 			continue
 		}
 		go handle(conn)
@@ -38,56 +39,68 @@ func main() {
 
 // this represents handling a single client connection to the load balancer
 func handle(conn net.Conn) {
+	id := conn.RemoteAddr().String()
+	defer log.Printf("[%s] handle: exited, its defers ran", id)
 	defer conn.Close()
-	fmt.Printf("\n--- new connection from %s ---\n", conn.RemoteAddr())
+
+	log.Printf("[%s] new connection", id)
 
 	buf := make([]byte, 4096)
 
 	backend_conn, err := net.Dial("tcp", "127.0.0.1:8081") // right now hardcoding the address.. with multiple servers, will add context from the connection using for assignment (what goes where)
 	if err != nil {
-		log.Println("error while connecting to backend:", err)
+		log.Printf("[%s] dial backend: %v", id, err)
 		return
 	}
 	defer backend_conn.Close()
+	log.Printf("[%s] dialed backend: %s -> %s", id, backend_conn.LocalAddr(), backend_conn.RemoteAddr())
 
-	go handleBackendResponse(backend_conn, conn)
+	go handleBackendResponse(backend_conn, conn, id)
+
 	for {
 		n, err := conn.Read(buf) // read whatever bytes have arrived so far
 		if err != nil {
-			log.Println("client→backend: read => error while reading from connection:", err)
+			logReadErr(id, "client→backend", err)
 			return // TODO: handle connection closure and cleanup properly.. right now we simply close the connection.. introduce some sort of a graceful shutdown for the connection
 		}
+		log.Printf("[%s] client→backend: %d bytes", id, n)
 
-		fmt.Println(string(buf[:n])) // human-readable
-		fmt.Printf("%q\n", buf[:n])  // same bytes, with \r\n made visible
-
-		_, err = backend_conn.Write(buf[:n])
-		if err != nil {
-			log.Println("client→backend: write => error while writing to backend connection:", err)
+		if _, err := backend_conn.Write(buf[:n]); err != nil {
+			log.Printf("[%s] client→backend: write to backend: %v", id, err)
 			return
 		}
 	}
 }
 
-func handleBackendResponse(backend_conn net.Conn, client_conn net.Conn) {
+func handleBackendResponse(backend_conn net.Conn, client_conn net.Conn, id string) {
+	defer log.Printf("[%s] backend→client: exited, its defers ran", id)
 	defer backend_conn.Close()
+	defer client_conn.Close()
 
 	buf := make([]byte, 4096)
 
 	for {
 		n, err := backend_conn.Read(buf)
 		if err != nil {
-			log.Println("backend→client: read => error while reading from connection:", err)
+			logReadErr(id, "backend→client", err)
 			return
 		}
+		log.Printf("[%s] backend→client: %d bytes", id, n)
 
-		fmt.Printf("%s\n", string(buf[:n]))
-		fmt.Printf("%q\n", buf[:n])
-
-		_, err = client_conn.Write(buf[:n])
-		if err != nil {
-			log.Println("backend→client: write => error while writing to client connection:", err)
+		if _, err := client_conn.Write(buf[:n]); err != nil {
+			log.Printf("[%s] backend→client: write to client: %v", id, err)
 			return
 		}
+	}
+}
+
+func logReadErr(id, dir string, err error) {
+	switch {
+	case errors.Is(err, io.EOF):
+		log.Printf("[%s] %s: read EOF (peer sent FIN)", id, dir)
+	case errors.Is(err, net.ErrClosed):
+		log.Printf("[%s] %s: read on a conn our own code closed", id, dir)
+	default:
+		log.Printf("[%s] %s: read error: %v", id, dir, err)
 	}
 }
