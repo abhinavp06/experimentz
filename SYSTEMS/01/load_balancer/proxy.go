@@ -43,17 +43,18 @@ func handle(conn net.Conn) {
 
 	buf := make([]byte, 4096)
 
-	backend_conn, err := net.Dial("tcp", "127.0.0.1:8081") // right now hardcoding the address.. with multiple servers, will add context from the connection using for assignment (what goes where) 
+	backend_conn, err := net.Dial("tcp", "127.0.0.1:8081") // right now hardcoding the address.. with multiple servers, will add context from the connection using for assignment (what goes where)
 	if err != nil {
 		log.Println("error while connecting to backend:", err)
 		return
 	}
 	defer backend_conn.Close()
 
+	go handleBackendResponse(backend_conn, conn)
 	for {
 		n, err := conn.Read(buf) // read whatever bytes have arrived so far
 		if err != nil {
-			log.Println("error while reading from connection:", err)
+			log.Println("client→backend: read => error while reading from connection:", err)
 			return // TODO: handle connection closure and cleanup properly.. right now we simply close the connection.. introduce some sort of a graceful shutdown for the connection
 		}
 
@@ -62,7 +63,30 @@ func handle(conn net.Conn) {
 
 		_, err = backend_conn.Write(buf[:n])
 		if err != nil {
-			log.Println("error while writing to backend connection:", err)
+			log.Println("client→backend: write => error while writing to backend connection:", err)
+			return
+		}
+	}
+}
+
+func handleBackendResponse(backend_conn net.Conn, client_conn net.Conn) {
+	defer backend_conn.Close()
+
+	buf := make([]byte, 4096)
+
+	for {
+		n, err := backend_conn.Read(buf)
+		if err != nil {
+			log.Println("backend→client: read => error while reading from connection:", err)
+			return
+		}
+
+		fmt.Printf("%s\n", string(buf[:n]))
+		fmt.Printf("%q\n", buf[:n])
+
+		_, err = client_conn.Write(buf[:n])
+		if err != nil {
+			log.Println("backend→client: write => error while writing to client connection:", err)
 			return
 		}
 	}
